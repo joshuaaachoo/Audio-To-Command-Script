@@ -75,9 +75,19 @@ class AudioTranscriber:
             letters_to_press = ['q', 'w', 'e', 'r']
             for letter in letters_to_press:
                 if letter in text.lower():  # Case-insensitive check
-                    # print(f"Detected '{letter}' in transcribed text. Pressing the '{letter}' key...")
-                    keyboard.write(letter)  # Simulate pressing the key
-                    time.sleep(0.1)
+                    print(f"Detected '{letter}' in transcribed text. Pressing the '{letter}' key...")
+                    if letter.__contains__('r'):  # Ensure the letter is valid
+                        keyboard.press_and_release(15)  # Simulate pressing the key
+                        # time.sleep(0.1)
+                    if letter.__contains__('e'):
+                        keyboard.press_and_release(14)
+                        # time.sleep(0.1)
+                    if letter.__contains__('w'):
+                        keyboard.press_and_release(13)
+                        # time.sleep(0.1)
+                    if letter.__contains__('q'):
+                        keyboard.press_and_release(12)
+                        # time.sleep(0.1)
 
         except Exception as e:
             print(f"Error saving transcript: {e}")
@@ -93,7 +103,7 @@ class AudioTranscriber:
                 accumulated_data.extend(audio_chunk)
                 
                 # Process when we have enough data (about 1 second worth for better responsiveness)
-                if len(accumulated_data) >= self.sample_rate * 5 * 4:  # 1 second * 4 bytes per sample (float32)
+                if len(accumulated_data) >= self.sample_rate * 1 * 4:  # 1 second * 4 bytes per sample (float32)
                     try:
                         # Convert float32 to int16 for speech recognition
                         audio_data = np.frombuffer(accumulated_data, dtype=np.float32)
