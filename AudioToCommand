@@ -1,0 +1,239 @@
+import speech_recognition as sr
+import pyaudio
+import threading
+import time
+import queue
+from datetime import datetime
+import keyboard  # Import keyboard library
+import numpy as np
+# this is the one with keyboard
+class AudioTranscriber:
+    def __init__(self, output_file="transcript.txt", source="microphone"):
+        # Initialize core components
+        self.recognizer = sr.Recognizer()
+        self.output_file = output_file
+        self.is_recording = False
+        self.source = source  # Can be "microphone", "system", or "both"
+        
+        # Create queues for managing audio buffering
+        self.mic_queue = queue.Queue()
+        self.system_queue = queue.Queue()
+        
+        # Audio settings optimized for precision
+        self.chunk_size = 2048
+        self.sample_format = pyaudio.paFloat32  # Higher quality audio format
+        self.channels = 1
+        self.sample_rate = 44100  # Higher sample rate for better quality
+        
+        # Configure recognizer settings
+        self.recognizer.energy_threshold = 50
+        self.recognizer.dynamic_energy_threshold = True
+        self.recognizer.dynamic_energy_adjustment_damping = 0.05
+        self.recognizer.dynamic_energy_ratio = 1.5
+        self.recognizer.pause_threshold = 0.4
+        self.recognizer.phrase_threshold = 0.2
+        self.recognizer.non_speaking_duration = 0.2
+
+        self.mic_device_index = None
+        self.blackhole_device_index = None
+
+    def _find_audio_devices(self):
+        """Find and store indices for microphone and BlackHole devices"""
+        audio = pyaudio.PyAudio()
+        print("\nAvailable audio input devices:")
+        for i in range(audio.get_device_count()):
+            try:
+                device_info = audio.get_device_info_by_index(i)
+                device_name = device_info.get('name')
+                print(f"Device {i}: {device_name}")
+                
+                # Find BlackHole device
+                if 'BlackHole' in device_name and device_info.get('maxInputChannels') > 0:
+                    self.blackhole_device_index = i
+                    print(f"Found BlackHole device at index {i}")
+                
+                # Find default microphone (avoid BlackHole)
+                if device_info.get('maxInputChannels') > 0 and 'BlackHole' not in device_name:
+                    if self.mic_device_index is None:
+                        self.mic_device_index = i
+                        print(f"Found default microphone at index {i}")
+                
+            except Exception as e:
+                print(f"Error getting device info for index {i}: {e}")
+        
+        audio.terminate()
+
+    def _save_transcript(self, text, source=""):
+        """Saves transcribed text with timestamp and source"""
+        try:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(self.output_file, "a", encoding='utf-8') as f:
+                f.write(f"[{timestamp}] [{source}] {text}\n")
+            print(f"Transcribed ({source}): {text}")
+
+            # Check for specific letters and simulate pressing keys
+            letters_to_press = ['q', 'w', 'e', 'r']
+            for letter in letters_to_press:
+                if letter in text.lower():  # Case-insensitive check
+                    # print(f"Detected '{letter}' in transcribed text. Pressing the '{letter}' key...")
+                    keyboard.write(letter)  # Simulate pressing the key
+                    time.sleep(0.1)
+
+        except Exception as e:
+            print(f"Error saving transcript: {e}")
+
+    def _process_audio_queue(self, audio_queue, source_name):
+        """Processes audio data from the queue with error handling"""
+        accumulated_data = bytearray()
+        
+        while self.is_recording or not audio_queue.empty():
+            try:
+                # Get audio data from queue with timeout
+                audio_chunk = audio_queue.get(timeout=1)
+                accumulated_data.extend(audio_chunk)
+                
+                # Process when we have enough data (about 1 second worth for better responsiveness)
+                if len(accumulated_data) >= self.sample_rate * 5 * 4:  # 1 second * 4 bytes per sample (float32)
+                    try:
+                        # Convert float32 to int16 for speech recognition
+                        audio_data = np.frombuffer(accumulated_data, dtype=np.float32)
+                        audio_data = (audio_data * 32767).astype(np.int16).tobytes()
+                        
+                        audio = sr.AudioData(audio_data, self.sample_rate, 2)  # 2 bytes per sample after conversion
+                        
+                        # Use more accurate language model
+                        text = self.recognizer.recognize_google(audio, language="en-US", show_all=False)
+                        if text:
+                            self._save_transcript(text, source_name)
+                    except sr.UnknownValueError:
+                        pass  # No speech detected
+                    except sr.RequestError as e:
+                        print(f"Speech recognition error: {e}")
+                        
+                    # Clear the buffer after processing
+                    accumulated_data = bytearray()
+                    
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"Error processing audio queue: {e}")
+                time.sleep(0.1)  # Prevent tight loop on error
+
+    def _audio_callback(self, queue):
+        """Creates a callback function for the audio stream"""
+        def callback(in_data, frame_count, time_info, status):
+            if status:
+                print(f"Stream status: {status}")
+            try:
+                queue.put(in_data)
+            except Exception as e:
+                print(f"Error in audio callback: {e}")
+            return (in_data, pyaudio.paContinue)
+        return callback
+
+    def start(self):
+        """Starts the audio recording and transcription"""
+        print("\nInitializing audio transcription...")
+        
+        try:
+            # Find audio devices first
+            self._find_audio_devices()
+            
+            if self.source in ["system", "both"] and self.blackhole_device_index is None:
+                print("\nError: BlackHole device not found. Please ensure BlackHole is installed and properly configured.")
+                return
+            
+            audio = pyaudio.PyAudio()
+            streams = []
+            threads = []
+            
+            self.is_recording = True
+            
+            # Start microphone recording if needed
+            if self.source in ["microphone", "both"]:
+                try:
+                    mic_stream = audio.open(
+                        format=self.sample_format,
+                        channels=self.channels,
+                        rate=self.sample_rate,
+                        input=True,
+                        input_device_index=self.mic_device_index,
+                        frames_per_buffer=self.chunk_size,
+                        stream_callback=self._audio_callback(self.mic_queue)
+                    )
+                    streams.append(mic_stream)
+                    
+                    # Start microphone processing thread
+                    mic_thread = threading.Thread(
+                        target=self._process_audio_queue,
+                        args=(self.mic_queue, "Microphone")
+                    )
+                    mic_thread.start()
+                    threads.append(mic_thread)
+                    print("Started microphone recording")
+                except Exception as e:
+                    print(f"Error setting up microphone recording: {e}")
+            
+            # Start system audio recording if needed
+            if self.source in ["system", "both"]:
+                try:
+                    system_stream = audio.open(
+                        format=self.sample_format,
+                        channels=self.channels,
+                        rate=self.sample_rate,
+                        input=True,
+                        input_device_index=self.blackhole_device_index,
+                        frames_per_buffer=self.chunk_size,
+                        stream_callback=self._audio_callback(self.system_queue)
+                    )
+                    streams.append(system_stream)
+                    
+                    # Start system audio processing thread
+                    system_thread = threading.Thread(
+                        target=self._process_audio_queue,
+                        args=(self.system_queue, "System Audio")
+                    )
+                    system_thread.start()
+                    threads.append(system_thread)
+                    print("Started system audio recording")
+                except Exception as e:
+                    print(f"Error setting up system audio recording: {e}")
+            
+            print(f"\nRecording started successfully! (Source: {self.source})")
+            print("Press Ctrl+C to stop recording")
+            
+            # Keep main thread alive and handle keyboard interrupt
+            try:
+                while self.is_recording:
+                    time.sleep(0.1)
+            except KeyboardInterrupt:
+                print("\nStopping recording...")
+            finally:
+                self.is_recording = False
+                
+                # Clean up resources
+                for stream in streams:
+                    try:
+                        stream.stop_stream()
+                        stream.close()
+                    except Exception as e:
+                        print(f"Error closing stream: {e}")
+                
+                try:
+                    audio.terminate()
+                except Exception as e:
+                    print(f"Error terminating audio: {e}")
+                
+                # Wait for all threads to finish
+                for thread in threads:
+                    thread.join()
+                print("Recording stopped.")
+                
+        except Exception as e:
+            print(f"Critical error in start method: {e}")
+
+# Example usage
+if __name__ == "__main__":
+    # Choose source: "microphone", "system", or "both"
+    transcriber = AudioTranscriber(source="both")
+    transcriber.start()
